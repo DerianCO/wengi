@@ -12,7 +12,93 @@ class User < ApplicationRecord
   validates_uniqueness_of :username
   validates_uniqueness_of :code
 
+
+  has_many :friendships, as: :friendable,
+                 class_name: "Friendship", dependent: :destroy
+
+  has_many :blocked_friends,
+            -> { where friendships: { status: 3 } },
+            through: :friendships,
+            source: :friend
+
+  has_many :friends,
+            -> { where friendships: { status: 2 } },
+            through: :friendships
+
+  has_many :requested_friends,
+            -> { where friendships: { status: 1 } },
+            through: :friendships,
+            source: :friend
+
+  has_many :pending_friends,
+            -> { where friendships: { status: 0 } },
+            through: :friendships,
+            source: :friend
+
+  def friend_request(friend)
+    unless self == friend || Friendship.exist?(self, friend)
+      transaction do
+        Friendship.create_relation(self, friend, status: 0)
+        Friendship.create_relation(friend, self, status: 1)
+      end
+    end
+  end
+
+  def accept_request(friend)
+    on_relation_with(friend) do |one, other|
+      friendship = Friendship.find_unblocked_friendship(one, other)
+      friendship.accepted! if can_accept_request?(friendship)
+    end
+  end
+
+  def decline_request(friend)
+    on_relation_with(friend) do |one, other|
+      Friendship.find_unblocked_friendship(one, other).destroy
+    end
+  end
+
+  alias_method :remove_friend, :decline_request
+
+  def block_friend(friend)
+    on_relation_with(friend) do |one, other|
+      Friendship.find_unblocked_friendship(one, other).blocked!
+    end
+  end
+
+  def unblock_friend(friend)
+    return unless has_blocked(friend)
+    on_relation_with(friend) do |one, other|
+      Friendship.find_blocked_friendship(one, other).destroy
+    end
+  end
+
+  def on_relation_with(friend)
+    transaction do
+      yield(self, friend)
+      yield(friend, self)
+    end
+  end
+
+  def friends_with?(friend)
+    Friendship.find_relation(self, friend, status: 2).any?
+  end
+
+  def on_friendship_created(*args); end
+  def on_friendship_accepted(*args); end
+  def on_friendship_blocked(*args); end
+
   private
+  
+  def has_blocked(friend)
+    Friendship.find_one_side(self, friend).blocker_id == self.id
+  end
+
+  def can_accept_request?(friendship)
+    return if friendship.pending? && self == friendship.friendable
+    return if friendship.requested? && self == friendship.friend
+
+    true
+  end
 
   def generate_code
     letter = ("a".."z")
